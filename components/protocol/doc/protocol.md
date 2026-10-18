@@ -44,6 +44,23 @@ assert_eq!(request.request_id(), 11);
 assert_eq!(request.extent().unwrap().extent_id(), 7);
 ```
 
-## Frame Layout
+## RPC frame layout
 
-[frame-length:4][header-length:4][opcode:1][flatbuffers][payload][checksum:4]
+`[frame-length:4][header-length:4][opcode:1][flatbuffers][payload][checksum:4]`
+
+Both lengths and the checksum are unsigned 32-bit big-endian integers.
+`frame-length` counts the bytes after itself, including the checksum.
+`header-length` counts only the FlatBuffers root bytes (not the opcode or payload).
+The four opcode values are append request = 1, seal request = 2, append response = 3,
+and seal response = 4. Value 0 is reserved. The payload is opaque and may be
+empty; an empty payload is decoded as `None`. The checksum is CRC-32/IEEE,
+computed by `crc32fast` over the bytes starting with `header-length` and ending
+with the payload; it excludes `frame-length` and the checksum itself. This is
+not CRC32C: frames using the former CRC32C checksum are incompatible.
+
+The `rpc::FrameCodec` encoder and decoder can be used with
+`tokio_util::codec::Framed`. `FrameCodec::default()` limits `frame-length` to
+16 MiB; `FrameCodec::new(max_frame_len)` sets a different limit. Headers are
+verified as the FlatBuffers root type selected by the opcode. The schema has no
+per-table identifier, so verification checks structural validity, not the
+original table type independently of the opcode.
