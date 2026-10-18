@@ -5,11 +5,19 @@ edition = "2024"
 
 [dependencies]
 rpc = { path = "components/rpc" }
+data-node = { path = "components/data-node" }
+stream-manager = { path = "components/stream-manager" }
 
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.7"
 
 [workspace]
 resolver = "3"
 members = [
+    "components/client",
+    "components/data-node",
     "components/protocol", 
-    "components/rpc"
+    "components/rpc",
+    "components/server", 
+    "components/stream-manager"
 ]
