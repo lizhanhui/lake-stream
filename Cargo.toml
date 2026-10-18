@@ -4,11 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-
+rpc = { path = "components/rpc" }
 
 
 [workspace]
 resolver = "3"
 members = [
-    "components/protocol"
+    "components/protocol", 
+    "components/rpc"
 ]

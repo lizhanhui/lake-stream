@@ -1,0 +1,10 @@
+[package]
+name = "rpc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+protocol = { path = "../protocol" }
+tokio = { version = "1.53.3", features = ["full"] }
+tokio-util = "0.7.20"
+bytes = "1"
