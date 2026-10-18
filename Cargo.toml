@@ -16,8 +16,10 @@ resolver = "3"
 members = [
     "components/client",
     "components/data-node",
-    "components/protocol", 
+    "components/protocol",
     "components/rpc",
-    "components/server", 
+    "components/server",
+    "components/snafu-virtstack",
+    "components/snafu-virtstack-macro",
     "components/stream-manager"
 ]
