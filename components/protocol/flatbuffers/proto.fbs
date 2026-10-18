@@ -1,0 +1,47 @@
+namespace Stream.Store;
+
+struct Stream {
+    stream_id: uint64;
+    epoch: uint32;
+}
+
+struct Extent {
+    stream: Stream;
+    extent_id: uint64;
+}
+
+table Status {
+    code: short;
+    message: string;
+}
+
+table AppendRequest {
+    request_id: uint64;
+    extent: Extent;
+}
+
+table AppendResponse {
+    request_id: uint64;
+    extent: Extent;
+    status: Status;
+    offset: uint64;
+}
+
+enum SealSource : byte {
+    Client = 0,
+    StreamManager = 1
+}
+
+
+table SealRequest {
+    request_id: uint64;
+    stream: Stream;
+    source: SealSource = Client;
+}
+
+table SealResponse {
+    request_id: uint64;
+    status: Status;
+    extent: Extent;
+    offset: uint64;
+}
