@@ -91,3 +91,24 @@ it excludes listener, runtime, and connection setup. Throughput counts request
 plus response wire bytes. Set `RPC_BENCH_PAYLOAD_SIZES` as above to benchmark
 other request payload sizes (up to the 32-bit frame-length limit); run with
 `-- --test` to smoke-test the network exchanges.
+
+Run `cargo bench -p rpc --bench pipeline` for a continuously refilled,
+bounded-depth append pipeline over one persistent loopback TCP connection.
+Configure request payload sizes and the maximum number of in-flight requests:
+
+```sh
+RPC_BENCH_PAYLOAD_SIZES=0,1024,65536 RPC_BENCH_PIPELINE_DEPTHS=1,4,16 cargo bench -p rpc --bench pipeline
+```
+
+The defaults are payloads of 0, 1024, 65536 and 1048576 bytes and depths of
+1, 4, 16 and 64. The client keeps sending as responses free slots; the server
+returns a header-only append response containing the matching `request_id`.
+`throughput` reports completed request-plus-response wire bytes per wall time;
+`mean_latency` reports the mean per-request duration from just before sending
+to receiving and verifying its response, using `request_id` to match timestamps.
+These are separate Criterion runs. Latency excludes time waiting for an available
+pipeline slot, while both measurements include encoding, checksums, TCP I/O and
+decoding. Listener and connection setup are excluded. Each sample runs at
+least two windows of requests; depth is the maximum in-flight count, not a
+guarantee that this many requests are simultaneously outstanding under
+write backpressure or fast responses.
