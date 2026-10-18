@@ -64,3 +64,30 @@ The `rpc::FrameCodec` encoder and decoder can be used with
 verified as the FlatBuffers root type selected by the opcode. The schema has no
 per-table identifier, so verification checks structural validity, not the
 original table type independently of the opcode.
+
+## RPC benchmarks
+
+Run `cargo bench -p rpc --bench codec` to measure FlatBuffers append-request
+and append-response header serialization/verification, `Frame::new`, and
+`FrameCodec` encoding/decoding (including CRC-32). Request payloads default to
+0, 1024, 65536, and 1048576 bytes; append responses have no body. Supply
+comma-separated byte sizes for other request payloads:
+
+```sh
+RPC_BENCH_PAYLOAD_SIZES=64,4096,2097152 cargo bench -p rpc --bench codec
+```
+
+Header serialization includes copying finished FlatBuffers into `Bytes`.
+Codec encode/decode timings exclude creating the frame, output buffer, and input
+buffer; decode starts with a complete buffered frame. The `codec` benchmark
+does not include network I/O. Zero-byte request payloads decode as `None`.
+
+Run `cargo bench -p rpc --bench ping_pong` for an end-to-end append-request /
+append-response round trip over a persistent Tokio TCP connection on loopback.
+The server binds an ephemeral port, decodes and checks the request, then builds
+and sends a response without a payload. The timed operation includes header
+construction, frame verification, CRC-32, and both directions of socket I/O;
+it excludes listener, runtime, and connection setup. Throughput counts request
+plus response wire bytes. Set `RPC_BENCH_PAYLOAD_SIZES` as above to benchmark
+other request payload sizes (up to the 32-bit frame-length limit); run with
+`-- --test` to smoke-test the network exchanges.

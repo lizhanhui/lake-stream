@@ -13,3 +13,12 @@ crc32fast = "1.5.2"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
+futures-util = { version = "0.3", features = ["sink"] }
+
+[[bench]]
+name = "codec"
+harness = false
+
+[[bench]]
+name = "ping_pong"
+harness = false
