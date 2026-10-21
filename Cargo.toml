@@ -20,6 +20,7 @@ members = [
     "components/rpc",
     "components/server",
     "components/snafu-virtstack",
-    "components/snafu-virtstack-macro",
+    "components/snafu-virtstack-macro", 
+    "components/store",
     "components/stream-manager"
 ]

@@ -217,6 +217,7 @@ name = "data-node"
 version = "0.1.0"
 dependencies = [
  "server",
+ "store",
 ]
 
 [[package]]
@@ -716,6 +717,10 @@ dependencies = [
  "libc",
  "windows-sys",
 ]
+
+[[package]]
+name = "store"
+version = "0.1.0"
 
 [[package]]
 name = "stream-manager"
