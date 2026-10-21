@@ -339,6 +339,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lake-stream"
+version = "0.1.0"
+dependencies = [
+ "data-node",
+ "rpc",
+ "stream-manager",
+ "tikv-jemallocator",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -728,16 +738,6 @@ version = "0.1.0"
 dependencies = [
  "client",
  "server",
-]
-
-[[package]]
-name = "stream-store"
-version = "0.1.0"
-dependencies = [
- "data-node",
- "rpc",
- "stream-manager",
- "tikv-jemallocator",
 ]
 
 [[package]]
