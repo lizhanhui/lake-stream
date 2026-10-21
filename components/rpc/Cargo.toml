@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 protocol = { path = "../protocol" }
+snafu = "0.9"
+snafu-virtstack = { path = "../snafu-virtstack" }
 flatbuffers = "25.12.19"
 tokio = { version = "1.53.3", features = ["full"] }
 tokio-util = { version = "0.7.20", features = ["codec"] }

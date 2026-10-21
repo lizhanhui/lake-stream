@@ -3,11 +3,107 @@ use std::io;
 use bytes::{BufMut, Bytes, BytesMut};
 use flatbuffers::root;
 use protocol::{AppendRequest, AppendResponse, SealRequest, SealResponse};
+use snafu::{Location, ResultExt, Snafu};
+use snafu_virtstack::stack_trace_debug;
 use tokio_util::codec::{Decoder, Encoder};
 
+use crate::opcode::OpCodeError;
 use crate::{Header, OpCode};
 
 const MAX_FRAME_LENGTH: usize = 16 * 1024 * 1024;
+
+#[derive(Snafu)]
+#[stack_trace_debug]
+enum HeaderError {
+    #[snafu(display("invalid {opcode:?} RPC header: {error}"))]
+    Invalid {
+        opcode: OpCode,
+        #[snafu(source)]
+        error: flatbuffers::InvalidFlatbuffer,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("reserved RPC opcode"))]
+    Reserved {
+        #[snafu(implicit)]
+        location: Location,
+    },
+}
+
+#[derive(Snafu)]
+#[stack_trace_debug]
+enum CodecError {
+    #[snafu(display("{reason}"))]
+    InvalidInput {
+        reason: &'static str,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("{reason}"))]
+    InvalidData {
+        reason: &'static str,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("RPC frame too large ({frame_len} > {max_frame_len})"))]
+    EncodeFrameTooLarge {
+        frame_len: usize,
+        max_frame_len: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("RPC frame too short ({frame_len} bytes)"))]
+    FrameTooShort {
+        frame_len: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("RPC frame too large ({frame_len} > {max_frame_len})"))]
+    DecodeFrameTooLarge {
+        frame_len: usize,
+        max_frame_len: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("RPC header exceeds frame ({header_len} > {max_header_len})"))]
+    HeaderExceedsFrame {
+        header_len: usize,
+        max_header_len: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("RPC checksum mismatch (expected {expected:#010x}, got {actual:#010x})"))]
+    ChecksumMismatch {
+        expected: u32,
+        actual: u32,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("failed to decode RPC opcode: {source}"))]
+    DecodeOpcode {
+        source: OpCodeError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("failed to decode RPC header: {source}"))]
+    DecodeHeader {
+        source: HeaderError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+}
+
+impl CodecError {
+    fn into_io(self) -> io::Error {
+        let kind = match self {
+            Self::InvalidInput { .. } | Self::EncodeFrameTooLarge { .. } => {
+                io::ErrorKind::InvalidInput
+            }
+            _ => io::ErrorKind::InvalidData,
+        };
+        io::Error::new(kind, self)
+    }
+}
 
 /// [frame-length:4][header-length:4][opcode:1][flatbuffers][payload][checksum:4]
 pub struct Frame {
@@ -18,6 +114,11 @@ pub struct Frame {
 
 impl Frame {
     pub fn new(opcode: OpCode, header: Bytes, payload: Option<Bytes>) -> io::Result<Self> {
+        Self::try_new(opcode, header, payload)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    }
+
+    fn try_new(opcode: OpCode, header: Bytes, payload: Option<Bytes>) -> Result<Self, HeaderError> {
         parse_header(opcode, &header)?;
         Ok(Self {
             opcode,
@@ -39,25 +140,21 @@ impl Frame {
     }
 }
 
-fn parse_header<'a>(opcode: OpCode, bytes: &'a [u8]) -> io::Result<Header<'a>> {
-    let invalid = |error| io::Error::new(io::ErrorKind::InvalidData, error);
+fn parse_header<'a>(opcode: OpCode, bytes: &'a [u8]) -> Result<Header<'a>, HeaderError> {
     match opcode {
         OpCode::AppendRequest => root::<AppendRequest>(bytes)
             .map(Header::AppendRequest)
-            .map_err(invalid),
+            .context(InvalidSnafu { opcode }),
         OpCode::SealRequest => root::<SealRequest>(bytes)
             .map(Header::SealRequest)
-            .map_err(invalid),
+            .context(InvalidSnafu { opcode }),
         OpCode::AppendResponse => root::<AppendResponse>(bytes)
             .map(Header::AppendResponse)
-            .map_err(invalid),
+            .context(InvalidSnafu { opcode }),
         OpCode::SealResponse => root::<SealResponse>(bytes)
             .map(Header::SealResponse)
-            .map_err(invalid),
-        OpCode::Unspecified => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "reserved RPC opcode",
-        )),
+            .context(InvalidSnafu { opcode }),
+        OpCode::Unspecified => Err(ReservedSnafu.build()),
     }
 }
 
@@ -89,23 +186,41 @@ impl Encoder<Frame> for FrameCodec {
             .checked_add(payload_len)
             .and_then(|len| len.checked_add(9))
             .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "RPC frame length overflow")
+                InvalidInputSnafu {
+                    reason: "RPC frame length overflow",
+                }
+                .build()
+                .into_io()
             })?;
         if frame_len > self.max_frame_len {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "RPC frame too large",
-            ));
+            return Err(EncodeFrameTooLargeSnafu {
+                frame_len,
+                max_frame_len: self.max_frame_len,
+            }
+            .build()
+            .into_io());
         }
         let frame_len = u32::try_from(frame_len).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "RPC frame length overflow")
+            InvalidInputSnafu {
+                reason: "RPC frame length overflow",
+            }
+            .build()
+            .into_io()
         })?;
         let header_len = u32::try_from(frame.header.len()).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "RPC header length overflow")
+            InvalidInputSnafu {
+                reason: "RPC header length overflow",
+            }
+            .build()
+            .into_io()
         })?;
 
         let total_len = (frame_len as usize).checked_add(4).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "RPC frame length overflow")
+            InvalidInputSnafu {
+                reason: "RPC frame length overflow",
+            }
+            .build()
+            .into_io()
         })?;
         let start = dst.len();
         dst.reserve(total_len);
@@ -132,40 +247,45 @@ impl Decoder for FrameCodec {
         }
         let frame_len = u32::from_be_bytes(src[..4].try_into().unwrap()) as usize;
         if frame_len < 9 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "RPC frame too short",
-            ));
+            return Err(FrameTooShortSnafu { frame_len }.build().into_io());
         }
         if frame_len > self.max_frame_len {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "RPC frame too large",
-            ));
+            return Err(DecodeFrameTooLargeSnafu {
+                frame_len,
+                max_frame_len: self.max_frame_len,
+            }
+            .build()
+            .into_io());
         }
         let total_len = frame_len.checked_add(4).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "RPC frame length overflow")
+            InvalidDataSnafu {
+                reason: "RPC frame length overflow",
+            }
+            .build()
+            .into_io()
         })?;
         if src.len() < 8 {
             return Ok(None);
         }
         let header_len = u32::from_be_bytes(src[4..8].try_into().unwrap()) as usize;
         if header_len > frame_len - 9 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "RPC header exceeds frame",
-            ));
+            return Err(HeaderExceedsFrameSnafu {
+                header_len,
+                max_header_len: frame_len - 9,
+            }
+            .build()
+            .into_io());
         }
         if src.len() < total_len {
             return Ok(None);
         }
-        let opcode = OpCode::try_from(src[8])?;
-        let checksum = u32::from_be_bytes(src[total_len - 4..total_len].try_into().unwrap());
-        if checksum != crc32fast::hash(&src[4..total_len - 4]) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "RPC checksum mismatch",
-            ));
+        let opcode = OpCode::parse(src[8])
+            .context(DecodeOpcodeSnafu)
+            .map_err(CodecError::into_io)?;
+        let actual = u32::from_be_bytes(src[total_len - 4..total_len].try_into().unwrap());
+        let expected = crc32fast::hash(&src[4..total_len - 4]);
+        if actual != expected {
+            return Err(ChecksumMismatchSnafu { expected, actual }.build().into_io());
         }
 
         let wire = src.split_to(total_len).freeze();
@@ -173,7 +293,10 @@ impl Decoder for FrameCodec {
         let payload_start = 9 + header_len;
         let payload =
             (payload_start < total_len - 4).then(|| wire.slice(payload_start..total_len - 4));
-        Frame::new(opcode, header, payload).map(Some)
+        Frame::try_new(opcode, header, payload)
+            .context(DecodeHeaderSnafu)
+            .map(Some)
+            .map_err(CodecError::into_io)
     }
 }
 
@@ -265,7 +388,25 @@ mod tests {
         wire[end - 4..].copy_from_slice(&checksum.to_be_bytes());
         let error = FrameCodec::new(1024).decode(&mut wire).err().unwrap();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("opcode"));
+        assert!(error.to_string().contains("unknown RPC opcode 0"));
+        let diagnostic = error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<CodecError>()
+            .unwrap();
+        assert!(matches!(
+            diagnostic,
+            CodecError::DecodeOpcode {
+                source: OpCodeError::Unknown { value: 0, .. },
+                ..
+            }
+        ));
+        let stack = format!("{diagnostic:?}");
+        assert!(stack.starts_with(
+            "0: failed to decode RPC opcode: unknown RPC opcode 0, at components/rpc/src/frame.rs:"
+        ));
+        assert!(stack.contains("\n1: unknown RPC opcode 0, at components/rpc/src/opcode.rs:"));
+        assert!(snafu_virtstack::StackError::next(diagnostic).is_some());
     }
 
     #[test]
@@ -276,6 +417,9 @@ mod tests {
         let error = FrameCodec::new(1024).decode(&mut wire).err().unwrap();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("checksum"));
+        let stack = format!("{:?}", error.get_ref().unwrap());
+        assert!(stack.starts_with("0: RPC checksum mismatch (expected 0x"));
+        assert!(stack.contains(", at components/rpc/src/frame.rs:"));
     }
 
     #[test]
@@ -288,6 +432,37 @@ mod tests {
         let error = FrameCodec::new(1024).decode(&mut wire).err().unwrap();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(!error.to_string().contains("checksum"));
+        assert!(
+            error
+                .to_string()
+                .contains("invalid AppendRequest RPC header")
+        );
+        let diagnostic = error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<CodecError>()
+            .unwrap();
+        assert!(matches!(
+            diagnostic,
+            CodecError::DecodeHeader {
+                source: HeaderError::Invalid {
+                    opcode: OpCode::AppendRequest,
+                    ..
+                },
+                ..
+            }
+        ));
+        let stack = format!("{diagnostic:?}");
+        assert!(
+            stack.starts_with("0: failed to decode RPC header: invalid AppendRequest RPC header: ")
+        );
+        assert!(stack.contains(", at components/rpc/src/frame.rs:"));
+        assert!(stack.contains("\n1: invalid AppendRequest RPC header: "));
+        assert!(stack.contains("\n2: "));
+        assert!(format!("{error:?}").contains("0: failed to decode RPC header"));
+        let source = std::error::Error::source(diagnostic).unwrap();
+        let verifier = std::error::Error::source(source).unwrap();
+        assert!(error.to_string().contains(&verifier.to_string()));
     }
 
     #[test]
@@ -302,6 +477,9 @@ mod tests {
         let error = FrameCodec::new(9).encode(frame, &mut output).err().unwrap();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert_eq!(&output[..], b"existing");
+        let stack = format!("{:?}", error.get_ref().unwrap());
+        assert!(stack.starts_with("0: RPC frame too large ("));
+        assert!(stack.contains(", at components/rpc/src/frame.rs:"));
     }
 
     #[test]
@@ -473,14 +651,30 @@ mod tests {
 
     #[test]
     fn frame_rejects_invalid_flatbuffers_and_reserved_opcode() {
-        assert!(Frame::new(OpCode::AppendRequest, Bytes::from_static(b"invalid"), None).is_err());
-        assert!(
-            Frame::new(
-                OpCode::Unspecified,
-                header_bytes(OpCode::AppendRequest),
-                None
-            )
-            .is_err()
-        );
+        let error = Frame::new(OpCode::AppendRequest, Bytes::from_static(b"invalid"), None)
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let diagnostic = error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<HeaderError>()
+            .unwrap();
+        let stack = format!("{diagnostic:?}");
+        assert!(stack.starts_with("0: invalid AppendRequest RPC header: "));
+        assert!(stack.contains(", at components/rpc/src/frame.rs:"));
+        assert!(stack.contains("\n1: "));
+        assert!(std::error::Error::source(diagnostic).is_some());
+
+        let error = Frame::new(
+            OpCode::Unspecified,
+            header_bytes(OpCode::AppendRequest),
+            None,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let stack = format!("{:?}", error.get_ref().unwrap());
+        assert!(stack.starts_with("0: reserved RPC opcode, at components/rpc/src/frame.rs:"));
     }
 }
